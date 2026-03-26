@@ -1,4 +1,4 @@
-// server.js v10 — Remotion Lambda
+// server.js v11 — voz onyx, escenas desde GPT-4o via Make
 const express  = require("express");
 const https    = require("https");
 const fs       = require("fs");
@@ -12,9 +12,8 @@ const BASE_URL   = process.env.RAILWAY_PUBLIC_DOMAIN
   ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
   : `http://localhost:${PORT}`;
 
-// AWS / Remotion Lambda config
-const AWS_REGION        = process.env.AWS_REGION || "eu-west-1";
-const LAMBDA_FUNCTION   = process.env.REMOTION_LAMBDA_FUNCTION || "";
+const AWS_REGION         = process.env.AWS_REGION || "eu-west-1";
+const LAMBDA_FUNCTION    = process.env.REMOTION_LAMBDA_FUNCTION || "";
 const REMOTION_SERVE_URL = process.env.REMOTION_SERVE_URL || "";
 
 const AUDIO_DIR = path.join(__dirname, "public_audio");
@@ -24,22 +23,42 @@ app.use(express.json({ limit: "10mb" }));
 app.use("/audio", express.static(AUDIO_DIR));
 
 app.get("/", (req, res) => res.json({
-  status: "ok", version: "10.0.0",
-  lambda: LAMBDA_FUNCTION ? "✅" : "⚠️ not configured",
-  serveUrl: REMOTION_SERVE_URL ? "✅" : "⚠️ not configured"
+  status: "ok", version: "11.0.0",
+  lambda: LAMBDA_FUNCTION ? "✅ " + LAMBDA_FUNCTION : "⚠️ not configured",
+  serveUrl: REMOTION_SERVE_URL ? "✅" : "⚠️ not configured",
+  region: AWS_REGION
 }));
 app.get("/status", (req, res) => res.json({ status: "ready", uptime: process.uptime() }));
 
-function autoGenerateEscenas(numImagenes, duracionSeg) {
+// Parsea escenas — acepta array, JSON string, o string sin corchetes
+function parseEscenas(escenas, numImagenes, duracionSeg) {
+  // Si viene bien como array, úsalo
+  if (Array.isArray(escenas) && escenas.length > 0) return escenas;
+
+  // Si viene como string, intenta parsear
+  if (typeof escenas === "string" && escenas.trim()) {
+    const s = escenas.trim();
+    try { 
+      const parsed = JSON.parse(s);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    } catch (_) {}
+    try {
+      const parsed = JSON.parse(`[${s}]`);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    } catch (_) {}
+  }
+
+  // Fallback: auto-generar escenas
+  console.log("   ℹ️ Escenas auto-generadas (fallback)");
   const introEnd   = 3;
   const closeStart = duracionSeg - 5;
   const contentDur = closeStart - introEnd;
   const numScenes  = Math.min(numImagenes, 4);
   const sceneDur   = Math.floor(contentDur / numScenes);
   return Array.from({ length: numScenes }, (_, i) => ({
-    seg_inicio: introEnd + i * sceneDur,
-    seg_fin:    introEnd + (i + 1) * sceneDur,
-    img_index:  i,
+    seg_inicio:    introEnd + i * sceneDur,
+    seg_fin:       introEnd + (i + 1) * sceneDur,
+    img_index:     i % numImagenes,
     texto_overlay: ""
   }));
 }
@@ -55,8 +74,11 @@ function generateAudio(text, destPath) {
   return new Promise((resolve, reject) => {
     if (!OPENAI_KEY) return resolve(null);
     const body = JSON.stringify({
-      model: "tts-1", voice: "nova",
-      input: text.substring(0, 4096), response_format: "mp3"
+      model: "tts-1-hd",
+      voice: "onyx",            // voz masculina neutra
+      input: text.substring(0, 4096),
+      response_format: "mp3",
+      speed: 0.95               // ligeramente más pausado, más natural
     });
     const req = https.request({
       hostname: "api.openai.com", path: "/v1/audio/speech", method: "POST",
@@ -80,7 +102,6 @@ function generateAudio(text, destPath) {
   });
 }
 
-// Llama a Remotion Lambda via AWS SDK
 async function renderWithLambda(props, composition) {
   const { renderMediaOnLambda, getRenderProgress } = require("@remotion/lambda/client");
 
@@ -95,11 +116,10 @@ async function renderWithLambda(props, composition) {
     maxRetries: 3,
     privacy: "public",
     downloadBehavior: { type: "play-in-browser" },
-    concurrencyPerLambda: 1,  // límite bajo para cuentas AWS nuevas
-    framesPerLambda: 20,      // menos frames por invocación = menos concurrencia
+    concurrencyPerLambda: 1,
+    framesPerLambda: 20,
   });
 
-  // Esperar a que termine
   while (true) {
     const progress = await getRenderProgress({
       bucketName: result.bucketName,
@@ -109,7 +129,8 @@ async function renderWithLambda(props, composition) {
     });
 
     if (progress.done) return progress.outputFile;
-    if (progress.fatalErrorEncountered) throw new Error(progress.errors[0]?.message || "Lambda render failed");
+    if (progress.fatalErrorEncountered)
+      throw new Error(progress.errors[0]?.message || "Lambda render failed");
 
     console.log(`   ⏳ ${Math.round(progress.overallProgress * 100)}%`);
     await new Promise(r => setTimeout(r, 3000));
@@ -121,7 +142,7 @@ app.post("/render", async (req, res) => {
     return res.status(401).json({ error: "Unauthorized" });
 
   const {
-    titulo, guion_tts, imagenes,
+    titulo, guion_tts, imagenes, escenas,
     plantilla    = "uv-compact",
     duracion_seg = 30,
     variacion    = 1,
@@ -131,7 +152,7 @@ app.post("/render", async (req, res) => {
 
   if (!titulo) return res.status(400).json({ error: "Missing: titulo" });
   if (!LAMBDA_FUNCTION || !REMOTION_SERVE_URL)
-    return res.status(500).json({ error: "Lambda not configured. Set REMOTION_LAMBDA_FUNCTION and REMOTION_SERVE_URL" });
+    return res.status(500).json({ error: "Lambda not configured" });
 
   const isVertical  = formato === "vertical";
   const composition = isVertical ? "BomediaShort" : "BomediaVideo";
@@ -143,33 +164,36 @@ app.post("/render", async (req, res) => {
   const audioFile = path.join(AUDIO_DIR, `${safeId}-audio.mp3`);
 
   try {
-    // Generar audio
+    // Audio con onyx
     let audioUrl = undefined;
     if (guion_tts && OPENAI_KEY) {
-      console.log("   🎵 Generando audio...");
+      console.log("   🎵 Generando audio (onyx)...");
       try {
         await generateAudio(guion_tts, audioFile);
         audioUrl = `${BASE_URL}/audio/${safeId}-audio.mp3`;
-        console.log(`   🎵 Audio OK → ${audioUrl}`);
+        console.log("   🎵 Audio OK");
       } catch (e) {
         console.warn("   ⚠️ Audio falló:", e.message);
       }
     }
 
     const imagenesArr = parseImagenes(imagenes);
-    const escenasArr  = autoGenerateEscenas(imagenesArr.length, durSeg);
+    const escenasArr  = parseEscenas(escenas, imagenesArr.length, durSeg);
     console.log(`   📸 ${imagenesArr.length} imágenes | 🎬 ${escenasArr.length} escenas`);
 
     const props = {
-      titulo, guion_tts: guion_tts || "",
-      escenas: escenasArr, imagenes: imagenesArr,
-      plantilla, duracion_seg: durSeg,
-      variacion: Number(variacion) || 1,
-      audio_url: audioUrl,
-      formato: isVertical ? "vertical" : "horizontal",
+      titulo,
+      guion_tts:    guion_tts || "",
+      escenas:      escenasArr,
+      imagenes:     imagenesArr,
+      plantilla,
+      duracion_seg: durSeg,
+      variacion:    Number(variacion) || 1,
+      audio_url:    audioUrl,
+      formato:      isVertical ? "vertical" : "horizontal",
     };
 
-    console.log(`   🚀 Enviando a Lambda (${composition})...`);
+    console.log(`   🚀 Lambda (${composition})...`);
     const videoUrl = await renderWithLambda(props, composition);
 
     try { fs.unlinkSync(audioFile); } catch (_) {}
@@ -185,7 +209,8 @@ app.post("/render", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`\n🚀 Bomedia Video Factory v10 — Remotion Lambda`);
+  console.log(`\n🚀 Bomedia Video Factory v11`);
+  console.log(`   Voz: onyx (masculina neutra)`);
   console.log(`   Region: ${AWS_REGION}`);
   console.log(`   Lambda: ${LAMBDA_FUNCTION || "⚠️ not set"}`);
   console.log(`   OPENAI TTS: ${OPENAI_KEY ? "✅" : "⚠️ sin key"}`);
