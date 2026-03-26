@@ -3,10 +3,8 @@
   "version": "1.0.0",
   "description": "Bomedia video factory with Remotion + webhook server",
   "scripts": {
-    "dev": "concurrently \"npx remotion studio\" \"node server.js\"",
+    "start": "node server.js",
     "studio": "npx remotion studio",
-    "server": "node server.js",
-    "build": "npx remotion render",
     "render": "npx remotion render BomediaVideo out/video.mp4"
   },
   "dependencies": {
