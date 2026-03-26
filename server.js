@@ -1,13 +1,17 @@
-// server.js v2 — Bomedia Video Factory
+// server.js v3 — Bomedia Video Factory
+// Railway llama a OpenAI TTS internamente, no necesita audio desde Make
+
 const express = require("express");
 const { execSync } = require("child_process");
-const fs   = require("fs");
-const path = require("path");
-const os   = require("os");
+const https  = require("https");
+const fs     = require("fs");
+const path   = require("path");
+const os     = require("os");
 
-const app    = express();
-const PORT   = process.env.PORT || 3001;
-const SECRET = process.env.WEBHOOK_SECRET || "bomedia2024";
+const app      = express();
+const PORT     = process.env.PORT || 3001;
+const SECRET   = process.env.WEBHOOK_SECRET || "bomedia2024";
+const OPENAI_KEY = process.env.OPENAI_API_KEY || "";
 const BASE_URL = process.env.RAILWAY_PUBLIC_DOMAIN
   ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
   : `http://localhost:${PORT}`;
@@ -15,11 +19,52 @@ const BASE_URL = process.env.RAILWAY_PUBLIC_DOMAIN
 const VIDEOS_DIR = path.join(__dirname, "public_videos");
 if (!fs.existsSync(VIDEOS_DIR)) fs.mkdirSync(VIDEOS_DIR, { recursive: true });
 
-app.use(express.json({ limit: "50mb" }));
+app.use(express.json({ limit: "10mb" }));
 app.use("/videos", express.static(VIDEOS_DIR));
 
-app.get("/", (req, res) => res.json({ status: "ok", version: "2.0.0" }));
+app.get("/", (req, res) => res.json({ status: "ok", version: "3.0.0" }));
 app.get("/status", (req, res) => res.json({ status: "ready", uptime: process.uptime() }));
+
+// Genera audio MP3 con OpenAI TTS
+function generateAudio(text, destPath) {
+  return new Promise((resolve, reject) => {
+    if (!OPENAI_KEY) return resolve(null);
+
+    const body = JSON.stringify({
+      model: "tts-1",
+      voice: "nova",
+      input: text.substring(0, 4096),
+      response_format: "mp3"
+    });
+
+    const options = {
+      hostname: "api.openai.com",
+      path: "/v1/audio/speech",
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENAI_KEY}`,
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body)
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      if (res.statusCode !== 200) {
+        let err = "";
+        res.on("data", d => err += d);
+        res.on("end", () => reject(new Error(`OpenAI TTS error ${res.statusCode}: ${err}`)));
+        return;
+      }
+      const file = fs.createWriteStream(destPath);
+      res.pipe(file);
+      file.on("finish", () => { file.close(); resolve(destPath); });
+    });
+
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
 
 app.post("/render", async (req, res) => {
   if (req.headers["x-webhook-secret"] !== SECRET)
@@ -28,7 +73,7 @@ app.post("/render", async (req, res) => {
   const {
     titulo, guion_tts, escenas, imagenes,
     plantilla = "uv-compact", duracion_seg = 75, variacion = 1,
-    audio_url, audio_data, idea_id = "video",
+    idea_id = "video",
   } = req.body;
 
   if (!titulo || !escenas || !imagenes)
@@ -42,18 +87,28 @@ app.post("/render", async (req, res) => {
   const audioFile = path.join(os.tmpdir(), `${safeId}-audio.mp3`);
 
   try {
-    let resolvedAudio = audio_url || undefined;
-    if (audio_data) {
-      fs.writeFileSync(audioFile, Buffer.from(audio_data, "base64"));
-      resolvedAudio = audioFile;
-      console.log("   🎵 Audio base64 OK");
+    // Generar audio con OpenAI TTS
+    let resolvedAudio = undefined;
+    if (guion_tts && OPENAI_KEY) {
+      console.log("   🎵 Generando audio con OpenAI TTS...");
+      try {
+        await generateAudio(guion_tts, audioFile);
+        resolvedAudio = audioFile;
+        console.log("   🎵 Audio OK");
+      } catch (audioErr) {
+        console.warn("   ⚠️ Audio falló, continuando sin audio:", audioErr.message);
+      }
     }
+
+    // Parsear escenas e imagenes si vienen como string
+    const escenasObj  = typeof escenas  === "string" ? JSON.parse(escenas)  : escenas;
+    const imagenesObj = typeof imagenes === "string" ? JSON.parse(imagenes) : imagenes;
 
     const props = {
       titulo,
-      guion_tts: guion_tts || "",
-      escenas:   typeof escenas  === "string" ? JSON.parse(escenas)  : escenas,
-      imagenes:  typeof imagenes === "string" ? JSON.parse(imagenes) : imagenes,
+      guion_tts:    guion_tts || "",
+      escenas:      escenasObj,
+      imagenes:     imagenesObj,
       plantilla,
       duracion_seg: Number(duracion_seg),
       variacion:    Number(variacion),
@@ -71,7 +126,7 @@ app.post("/render", async (req, res) => {
     );
 
     try { fs.unlinkSync(propsFile); } catch (_) {}
-    try { if (audio_data) fs.unlinkSync(audioFile); } catch (_) {}
+    try { fs.unlinkSync(audioFile); } catch (_) {}
 
     const video_url = `${BASE_URL}/videos/${safeId}.mp4`;
     const file_size = fs.statSync(outFile).size;
@@ -88,6 +143,7 @@ app.post("/render", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`\n🚀 Bomedia Video Factory v2 — puerto ${PORT}`);
+  console.log(`\n🚀 Bomedia Video Factory v3 — puerto ${PORT}`);
+  console.log(`   OPENAI TTS: ${OPENAI_KEY ? "✅ configurado" : "⚠️ sin key"}`);
   console.log(`   BASE_URL: ${BASE_URL}\n`);
 });
