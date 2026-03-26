@@ -1,4 +1,4 @@
-// server.js v5 — Bomedia Video Factory
+// server.js v6 — Bomedia Video Factory — Shorts/Reels + YouTube
 const express  = require("express");
 const { execSync } = require("child_process");
 const https    = require("https");
@@ -20,39 +20,35 @@ if (!fs.existsSync(VIDEOS_DIR)) fs.mkdirSync(VIDEOS_DIR, { recursive: true });
 app.use(express.json({ limit: "10mb" }));
 app.use("/videos", express.static(VIDEOS_DIR));
 
-app.get("/",       (req, res) => res.json({ status: "ok", version: "5.0.0" }));
+app.get("/",       (req, res) => res.json({ status: "ok", version: "6.0.0" }));
 app.get("/status", (req, res) => res.json({ status: "ready", uptime: process.uptime() }));
 
-// Auto-genera escenas basándose en número de imágenes y duración
+// Auto-genera escenas según número de imágenes y duración
 function autoGenerateEscenas(numImagenes, duracionSeg) {
   const escenas = [];
-  const introEnd = 4;
-  const closeStart = duracionSeg - 7;
-  const contentDuration = closeStart - introEnd;
-  const numScenes = Math.min(numImagenes, 4);
-  const sceneDuration = Math.floor(contentDuration / numScenes);
-
+  const introEnd    = 3;
+  const closeStart  = duracionSeg - 5;
+  const contentDur  = closeStart - introEnd;
+  const numScenes   = Math.min(numImagenes, 4);
+  const sceneDur    = Math.floor(contentDur / numScenes);
   for (let i = 0; i < numScenes; i++) {
     escenas.push({
-      seg_inicio: introEnd + (i * sceneDuration),
-      seg_fin:    introEnd + ((i + 1) * sceneDuration),
-      img_index:  i,
+      seg_inicio:    introEnd + i * sceneDur,
+      seg_fin:       introEnd + (i + 1) * sceneDur,
+      img_index:     i,
       texto_overlay: ""
     });
   }
   return escenas;
 }
 
-// Parsea imagenes: string separado por | o array
 function parseImagenes(imagenes) {
   if (Array.isArray(imagenes)) return imagenes;
-  if (typeof imagenes === "string") {
+  if (typeof imagenes === "string")
     return imagenes.split("|").map(u => u.trim()).filter(Boolean);
-  }
   return [];
 }
 
-// OpenAI TTS
 function generateAudio(text, destPath) {
   return new Promise((resolve, reject) => {
     if (!OPENAI_KEY) return resolve(null);
@@ -88,13 +84,21 @@ app.post("/render", async (req, res) => {
 
   const {
     titulo, guion_tts, imagenes,
-    plantilla = "uv-compact", duracion_seg = 75, variacion = 1,
-    idea_id = "video",
+    plantilla    = "uv-compact",
+    duracion_seg = 30,
+    variacion    = 1,
+    formato      = "vertical",   // "vertical" = Shorts/Reels | "horizontal" = YouTube
+    idea_id      = "video",
   } = req.body;
 
   if (!titulo) return res.status(400).json({ error: "Missing: titulo" });
 
-  console.log(`\n📹 ${idea_id} — "${titulo}"`);
+  // Shorts/Reels: máx 60s vertical. YouTube: máx 90s horizontal
+  const isVertical = formato !== "horizontal";
+  const composition = isVertical ? "BomediaShort" : "BomediaVideo";
+  const durSeg  = Math.min(Number(duracion_seg) || 30, isVertical ? 60 : 90);
+
+  console.log(`\n📹 ${idea_id} — "${titulo}" [${isVertical ? "9:16 Short" : "16:9 YouTube"}] ${durSeg}s`);
 
   const safeId    = idea_id.replace(/[^a-zA-Z0-9_-]/g, "_");
   const outFile   = path.join(VIDEOS_DIR, `${safeId}.mp4`);
@@ -102,7 +106,7 @@ app.post("/render", async (req, res) => {
   const audioFile = path.join(os.tmpdir(), `${safeId}-audio.mp3`);
 
   try {
-    // Audio con OpenAI TTS
+    // Audio
     let resolvedAudio = undefined;
     if (guion_tts && OPENAI_KEY) {
       console.log("   🎵 Generando audio...");
@@ -115,14 +119,10 @@ app.post("/render", async (req, res) => {
       }
     }
 
-    // Imagenes
     const imagenesArr = parseImagenes(imagenes);
-    console.log(`   📸 ${imagenesArr.length} imágenes`);
+    const escenasArr  = autoGenerateEscenas(imagenesArr.length, durSeg);
 
-    // Escenas: siempre auto-generadas desde el servidor
-    const durSeg = Number(duracion_seg) || 75;
-    const escenasArr = autoGenerateEscenas(imagenesArr.length, durSeg);
-    console.log(`   🎬 ${escenasArr.length} escenas auto-generadas`);
+    console.log(`   📸 ${imagenesArr.length} imágenes | 🎬 ${escenasArr.length} escenas`);
 
     const props = {
       titulo,
@@ -133,15 +133,16 @@ app.post("/render", async (req, res) => {
       duracion_seg: durSeg,
       variacion:    Number(variacion) || 1,
       audio_url:    resolvedAudio,
+      formato:      isVertical ? "vertical" : "horizontal",
     };
 
     fs.writeFileSync(propsFile, JSON.stringify(props));
 
     const frames = durSeg * 30;
-    console.log(`   🎬 Renderizando ${frames} frames...`);
+    console.log(`   🎬 Renderizando ${frames} frames (${composition})...`);
 
     execSync(
-      `npx remotion render BomediaVideo "${outFile}" --props="${propsFile}" --frames=0-${frames-1} --log=warn --overwrite`,
+      `npx remotion render ${composition} "${outFile}" --props="${propsFile}" --frames=0-${frames-1} --log=warn --overwrite`,
       { cwd: __dirname, stdio: "pipe", timeout: 300000 }
     );
 
@@ -152,7 +153,7 @@ app.post("/render", async (req, res) => {
     const file_size = fs.statSync(outFile).size;
     console.log(`   ✅ ${video_url} (${Math.round(file_size/1024/1024)}MB)`);
 
-    res.json({ ok: true, idea_id, titulo, video_url, file_size });
+    res.json({ ok: true, idea_id, titulo, video_url, file_size, formato: props.formato });
 
   } catch (err) {
     try { fs.unlinkSync(propsFile); } catch (_) {}
@@ -163,7 +164,8 @@ app.post("/render", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`\n🚀 Bomedia Video Factory v5 — puerto ${PORT}`);
+  console.log(`\n🚀 Bomedia Video Factory v6`);
+  console.log(`   Formatos: BomediaShort (9:16 vertical) + BomediaVideo (16:9 horizontal)`);
   console.log(`   OPENAI TTS: ${OPENAI_KEY ? "✅" : "⚠️ sin key"}`);
   console.log(`   BASE_URL: ${BASE_URL}\n`);
 });
