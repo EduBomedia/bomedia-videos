@@ -92,9 +92,11 @@ async function renderWithLambda(props, composition) {
     inputProps: props,
     codec: "h264",
     imageFormat: "jpeg",
-    maxRetries: 1,
+    maxRetries: 3,
     privacy: "public",
     downloadBehavior: { type: "play-in-browser" },
+    concurrencyPerLambda: 1,  // límite bajo para cuentas AWS nuevas
+    framesPerLambda: 20,      // menos frames por invocación = menos concurrencia
   });
 
   // Esperar a que termine
