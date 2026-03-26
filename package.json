@@ -1,0 +1,24 @@
+{
+  "name": "bomedia-videos",
+  "version": "1.0.0",
+  "description": "Bomedia video factory with Remotion + webhook server",
+  "scripts": {
+    "dev": "concurrently \"npx remotion studio\" \"node server.js\"",
+    "studio": "npx remotion studio",
+    "server": "node server.js",
+    "build": "npx remotion render",
+    "render": "npx remotion render BomediaVideo out/video.mp4"
+  },
+  "dependencies": {
+    "@remotion/player": "^4.0.0",
+    "concurrently": "^8.2.0",
+    "express": "^4.18.2",
+    "remotion": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "typescript": "^5.3.0"
+  }
+}
