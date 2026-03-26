@@ -1,18 +1,16 @@
-// server.js v3 — Bomedia Video Factory
-// Railway llama a OpenAI TTS internamente, no necesita audio desde Make
-
-const express = require("express");
+// server.js v4 — Bomedia Video Factory
+const express  = require("express");
 const { execSync } = require("child_process");
-const https  = require("https");
-const fs     = require("fs");
-const path   = require("path");
-const os     = require("os");
+const https    = require("https");
+const fs       = require("fs");
+const path     = require("path");
+const os       = require("os");
 
-const app      = express();
-const PORT     = process.env.PORT || 3001;
-const SECRET   = process.env.WEBHOOK_SECRET || "bomedia2024";
+const app        = express();
+const PORT       = process.env.PORT || 3001;
+const SECRET     = process.env.WEBHOOK_SECRET || "bomedia2024";
 const OPENAI_KEY = process.env.OPENAI_API_KEY || "";
-const BASE_URL = process.env.RAILWAY_PUBLIC_DOMAIN
+const BASE_URL   = process.env.RAILWAY_PUBLIC_DOMAIN
   ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
   : `http://localhost:${PORT}`;
 
@@ -22,47 +20,61 @@ if (!fs.existsSync(VIDEOS_DIR)) fs.mkdirSync(VIDEOS_DIR, { recursive: true });
 app.use(express.json({ limit: "10mb" }));
 app.use("/videos", express.static(VIDEOS_DIR));
 
-app.get("/", (req, res) => res.json({ status: "ok", version: "3.0.0" }));
+app.get("/",       (req, res) => res.json({ status: "ok", version: "4.0.0" }));
 app.get("/status", (req, res) => res.json({ status: "ready", uptime: process.uptime() }));
 
-// Genera audio MP3 con OpenAI TTS
+// Parsea escenas en cualquier formato que llegue desde Make
+function parseEscenas(escenas) {
+  if (Array.isArray(escenas)) return escenas;
+  if (typeof escenas === "string") {
+    const s = escenas.trim();
+    // Intentar JSON directo
+    try { return JSON.parse(s); } catch (_) {}
+    // Intentar añadiendo corchetes (Make manda objetos sin array wrapper)
+    try { return JSON.parse(`[${s}]`); } catch (_) {}
+    // Fallback: escenas vacías, el vídeo renderizará solo con imágenes
+    console.warn("   ⚠️ No se pudieron parsear escenas, usando fallback");
+    return [];
+  }
+  return [];
+}
+
+// Parsea imagenes: string separado por | o array
+function parseImagenes(imagenes) {
+  if (Array.isArray(imagenes)) return imagenes;
+  if (typeof imagenes === "string") {
+    return imagenes.split("|").map(u => u.trim()).filter(Boolean);
+  }
+  return [];
+}
+
+// OpenAI TTS
 function generateAudio(text, destPath) {
   return new Promise((resolve, reject) => {
     if (!OPENAI_KEY) return resolve(null);
-
     const body = JSON.stringify({
-      model: "tts-1",
-      voice: "nova",
-      input: text.substring(0, 4096),
-      response_format: "mp3"
+      model: "tts-1", voice: "nova",
+      input: text.substring(0, 4096), response_format: "mp3"
     });
-
-    const options = {
-      hostname: "api.openai.com",
-      path: "/v1/audio/speech",
-      method: "POST",
+    const req = https.request({
+      hostname: "api.openai.com", path: "/v1/audio/speech", method: "POST",
       headers: {
         "Authorization": `Bearer ${OPENAI_KEY}`,
         "Content-Type": "application/json",
         "Content-Length": Buffer.byteLength(body)
       }
-    };
-
-    const req = https.request(options, (res) => {
+    }, (res) => {
       if (res.statusCode !== 200) {
-        let err = "";
-        res.on("data", d => err += d);
-        res.on("end", () => reject(new Error(`OpenAI TTS error ${res.statusCode}: ${err}`)));
+        let err = ""; res.on("data", d => err += d);
+        res.on("end", () => reject(new Error(`TTS ${res.statusCode}: ${err.substring(0,200)}`)));
         return;
       }
       const file = fs.createWriteStream(destPath);
       res.pipe(file);
       file.on("finish", () => { file.close(); resolve(destPath); });
     });
-
     req.on("error", reject);
-    req.write(body);
-    req.end();
+    req.write(body); req.end();
   });
 }
 
@@ -76,8 +88,7 @@ app.post("/render", async (req, res) => {
     idea_id = "video",
   } = req.body;
 
-  if (!titulo || !escenas || !imagenes)
-    return res.status(400).json({ error: "Missing: titulo, escenas, imagenes" });
+  if (!titulo) return res.status(400).json({ error: "Missing: titulo" });
 
   console.log(`\n📹 ${idea_id} — "${titulo}"`);
 
@@ -87,28 +98,29 @@ app.post("/render", async (req, res) => {
   const audioFile = path.join(os.tmpdir(), `${safeId}-audio.mp3`);
 
   try {
-    // Generar audio con OpenAI TTS
+    // Audio
     let resolvedAudio = undefined;
     if (guion_tts && OPENAI_KEY) {
-      console.log("   🎵 Generando audio con OpenAI TTS...");
+      console.log("   🎵 Generando audio...");
       try {
         await generateAudio(guion_tts, audioFile);
         resolvedAudio = audioFile;
         console.log("   🎵 Audio OK");
-      } catch (audioErr) {
-        console.warn("   ⚠️ Audio falló, continuando sin audio:", audioErr.message);
+      } catch (e) {
+        console.warn("   ⚠️ Audio falló:", e.message);
       }
     }
 
-    // Parsear escenas e imagenes si vienen como string
-    const escenasObj  = typeof escenas  === "string" ? JSON.parse(escenas)  : escenas;
-    const imagenesObj = typeof imagenes === "string" ? JSON.parse(imagenes) : imagenes;
+    const escenasArr  = parseEscenas(escenas);
+    const imagenesArr = parseImagenes(imagenes);
+
+    console.log(`   📸 ${imagenesArr.length} imágenes | 🎬 ${escenasArr.length} escenas`);
 
     const props = {
       titulo,
       guion_tts:    guion_tts || "",
-      escenas:      escenasObj,
-      imagenes:     imagenesObj,
+      escenas:      escenasArr,
+      imagenes:     imagenesArr,
       plantilla,
       duracion_seg: Number(duracion_seg),
       variacion:    Number(variacion),
@@ -143,7 +155,7 @@ app.post("/render", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`\n🚀 Bomedia Video Factory v3 — puerto ${PORT}`);
-  console.log(`   OPENAI TTS: ${OPENAI_KEY ? "✅ configurado" : "⚠️ sin key"}`);
+  console.log(`\n🚀 Bomedia Video Factory v4 — puerto ${PORT}`);
+  console.log(`   OPENAI TTS: ${OPENAI_KEY ? "✅" : "⚠️ sin key"}`);
   console.log(`   BASE_URL: ${BASE_URL}\n`);
 });
