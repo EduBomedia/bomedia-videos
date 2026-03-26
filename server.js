@@ -1,4 +1,4 @@
-// server.js v4 — Bomedia Video Factory
+// server.js v5 — Bomedia Video Factory
 const express  = require("express");
 const { execSync } = require("child_process");
 const https    = require("https");
@@ -20,23 +20,27 @@ if (!fs.existsSync(VIDEOS_DIR)) fs.mkdirSync(VIDEOS_DIR, { recursive: true });
 app.use(express.json({ limit: "10mb" }));
 app.use("/videos", express.static(VIDEOS_DIR));
 
-app.get("/",       (req, res) => res.json({ status: "ok", version: "4.0.0" }));
+app.get("/",       (req, res) => res.json({ status: "ok", version: "5.0.0" }));
 app.get("/status", (req, res) => res.json({ status: "ready", uptime: process.uptime() }));
 
-// Parsea escenas en cualquier formato que llegue desde Make
-function parseEscenas(escenas) {
-  if (Array.isArray(escenas)) return escenas;
-  if (typeof escenas === "string") {
-    const s = escenas.trim();
-    // Intentar JSON directo
-    try { return JSON.parse(s); } catch (_) {}
-    // Intentar añadiendo corchetes (Make manda objetos sin array wrapper)
-    try { return JSON.parse(`[${s}]`); } catch (_) {}
-    // Fallback: escenas vacías, el vídeo renderizará solo con imágenes
-    console.warn("   ⚠️ No se pudieron parsear escenas, usando fallback");
-    return [];
+// Auto-genera escenas basándose en número de imágenes y duración
+function autoGenerateEscenas(numImagenes, duracionSeg) {
+  const escenas = [];
+  const introEnd = 4;
+  const closeStart = duracionSeg - 7;
+  const contentDuration = closeStart - introEnd;
+  const numScenes = Math.min(numImagenes, 4);
+  const sceneDuration = Math.floor(contentDuration / numScenes);
+
+  for (let i = 0; i < numScenes; i++) {
+    escenas.push({
+      seg_inicio: introEnd + (i * sceneDuration),
+      seg_fin:    introEnd + ((i + 1) * sceneDuration),
+      img_index:  i,
+      texto_overlay: ""
+    });
   }
-  return [];
+  return escenas;
 }
 
 // Parsea imagenes: string separado por | o array
@@ -83,7 +87,7 @@ app.post("/render", async (req, res) => {
     return res.status(401).json({ error: "Unauthorized" });
 
   const {
-    titulo, guion_tts, escenas, imagenes,
+    titulo, guion_tts, imagenes,
     plantilla = "uv-compact", duracion_seg = 75, variacion = 1,
     idea_id = "video",
   } = req.body;
@@ -98,7 +102,7 @@ app.post("/render", async (req, res) => {
   const audioFile = path.join(os.tmpdir(), `${safeId}-audio.mp3`);
 
   try {
-    // Audio
+    // Audio con OpenAI TTS
     let resolvedAudio = undefined;
     if (guion_tts && OPENAI_KEY) {
       console.log("   🎵 Generando audio...");
@@ -111,10 +115,14 @@ app.post("/render", async (req, res) => {
       }
     }
 
-    const escenasArr  = parseEscenas(escenas);
+    // Imagenes
     const imagenesArr = parseImagenes(imagenes);
+    console.log(`   📸 ${imagenesArr.length} imágenes`);
 
-    console.log(`   📸 ${imagenesArr.length} imágenes | 🎬 ${escenasArr.length} escenas`);
+    // Escenas: siempre auto-generadas desde el servidor
+    const durSeg = Number(duracion_seg) || 75;
+    const escenasArr = autoGenerateEscenas(imagenesArr.length, durSeg);
+    console.log(`   🎬 ${escenasArr.length} escenas auto-generadas`);
 
     const props = {
       titulo,
@@ -122,14 +130,14 @@ app.post("/render", async (req, res) => {
       escenas:      escenasArr,
       imagenes:     imagenesArr,
       plantilla,
-      duracion_seg: Number(duracion_seg),
-      variacion:    Number(variacion),
+      duracion_seg: durSeg,
+      variacion:    Number(variacion) || 1,
       audio_url:    resolvedAudio,
     };
 
     fs.writeFileSync(propsFile, JSON.stringify(props));
 
-    const frames = Number(duracion_seg) * 30;
+    const frames = durSeg * 30;
     console.log(`   🎬 Renderizando ${frames} frames...`);
 
     execSync(
@@ -155,7 +163,7 @@ app.post("/render", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`\n🚀 Bomedia Video Factory v4 — puerto ${PORT}`);
+  console.log(`\n🚀 Bomedia Video Factory v5 — puerto ${PORT}`);
   console.log(`   OPENAI TTS: ${OPENAI_KEY ? "✅" : "⚠️ sin key"}`);
   console.log(`   BASE_URL: ${BASE_URL}\n`);
 });
