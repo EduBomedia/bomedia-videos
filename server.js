@@ -1,4 +1,4 @@
-// server.js v11 — voz onyx, escenas desde GPT-4o via Make
+// server.js v12 — escenas en formato pipe, voz onyx
 const express  = require("express");
 const https    = require("https");
 const fs       = require("fs");
@@ -23,33 +23,38 @@ app.use(express.json({ limit: "10mb" }));
 app.use("/audio", express.static(AUDIO_DIR));
 
 app.get("/", (req, res) => res.json({
-  status: "ok", version: "11.0.0",
+  status: "ok", version: "12.0.0",
   lambda: LAMBDA_FUNCTION ? "✅ " + LAMBDA_FUNCTION : "⚠️ not configured",
-  serveUrl: REMOTION_SERVE_URL ? "✅" : "⚠️ not configured",
   region: AWS_REGION
 }));
 app.get("/status", (req, res) => res.json({ status: "ready", uptime: process.uptime() }));
 
-// Parsea escenas — acepta array, JSON string, o string sin corchetes
-function parseEscenas(escenas, numImagenes, duracionSeg) {
-  // Si viene bien como array, úsalo
-  if (Array.isArray(escenas) && escenas.length > 0) return escenas;
-
-  // Si viene como string, intenta parsear
-  if (typeof escenas === "string" && escenas.trim()) {
-    const s = escenas.trim();
-    try { 
-      const parsed = JSON.parse(s);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-    } catch (_) {}
+// Parsea escenas en formato pipe: "3|18|0|Texto escena|18|33|1|Otro texto|..."
+// Cada escena = seg_inicio|seg_fin|img_index|texto_overlay
+function parseEscenasPipe(escenasStr, numImagenes, duracionSeg) {
+  if (typeof escenasStr === "string" && escenasStr.includes("|")) {
     try {
-      const parsed = JSON.parse(`[${s}]`);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-    } catch (_) {}
+      const parts = escenasStr.split("|");
+      const escenas = [];
+      for (let i = 0; i + 3 < parts.length; i += 4) {
+        escenas.push({
+          seg_inicio:    Number(parts[i].trim()),
+          seg_fin:       Number(parts[i+1].trim()),
+          img_index:     Number(parts[i+2].trim()),
+          texto_overlay: parts[i+3].trim()
+        });
+      }
+      if (escenas.length > 0) {
+        console.log(`   🎬 ${escenas.length} escenas desde pipe format`);
+        return escenas;
+      }
+    } catch (e) {
+      console.warn("   ⚠️ Error parseando escenas pipe:", e.message);
+    }
   }
 
-  // Fallback: auto-generar escenas
-  console.log("   ℹ️ Escenas auto-generadas (fallback)");
+  // Fallback auto-generar
+  console.log("   ℹ️ Escenas auto-generadas");
   const introEnd   = 3;
   const closeStart = duracionSeg - 5;
   const contentDur = closeStart - introEnd;
@@ -66,7 +71,7 @@ function parseEscenas(escenas, numImagenes, duracionSeg) {
 function parseImagenes(imagenes) {
   if (Array.isArray(imagenes)) return imagenes;
   if (typeof imagenes === "string")
-    return imagenes.split("|").map(u => u.trim()).filter(Boolean);
+    return imagenes.split("|").map(u => u.trim()).filter(u => u.startsWith("http"));
   return [];
 }
 
@@ -75,10 +80,10 @@ function generateAudio(text, destPath) {
     if (!OPENAI_KEY) return resolve(null);
     const body = JSON.stringify({
       model: "tts-1-hd",
-      voice: "onyx",            // voz masculina neutra
+      voice: "onyx",
       input: text.substring(0, 4096),
       response_format: "mp3",
-      speed: 0.95               // ligeramente más pausado, más natural
+      speed: 0.95
     });
     const req = https.request({
       hostname: "api.openai.com", path: "/v1/audio/speech", method: "POST",
@@ -104,7 +109,6 @@ function generateAudio(text, destPath) {
 
 async function renderWithLambda(props, composition) {
   const { renderMediaOnLambda, getRenderProgress } = require("@remotion/lambda/client");
-
   const result = await renderMediaOnLambda({
     region: AWS_REGION,
     functionName: LAMBDA_FUNCTION,
@@ -127,11 +131,9 @@ async function renderWithLambda(props, composition) {
       functionName: LAMBDA_FUNCTION,
       renderId: result.renderId,
     });
-
     if (progress.done) return progress.outputFile;
     if (progress.fatalErrorEncountered)
       throw new Error(progress.errors[0]?.message || "Lambda render failed");
-
     console.log(`   ⏳ ${Math.round(progress.overallProgress * 100)}%`);
     await new Promise(r => setTimeout(r, 3000));
   }
@@ -142,7 +144,7 @@ app.post("/render", async (req, res) => {
     return res.status(401).json({ error: "Unauthorized" });
 
   const {
-    titulo, guion_tts, imagenes, escenas,
+    titulo, guion_tts, imagenes, escenas_pipe,
     plantilla    = "uv-compact",
     duracion_seg = 30,
     variacion    = 1,
@@ -164,7 +166,6 @@ app.post("/render", async (req, res) => {
   const audioFile = path.join(AUDIO_DIR, `${safeId}-audio.mp3`);
 
   try {
-    // Audio con onyx
     let audioUrl = undefined;
     if (guion_tts && OPENAI_KEY) {
       console.log("   🎵 Generando audio (onyx)...");
@@ -178,7 +179,7 @@ app.post("/render", async (req, res) => {
     }
 
     const imagenesArr = parseImagenes(imagenes);
-    const escenasArr  = parseEscenas(escenas, imagenesArr.length, durSeg);
+    const escenasArr  = parseEscenasPipe(escenas_pipe, imagenesArr.length, durSeg);
     console.log(`   📸 ${imagenesArr.length} imágenes | 🎬 ${escenasArr.length} escenas`);
 
     const props = {
@@ -209,10 +210,8 @@ app.post("/render", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`\n🚀 Bomedia Video Factory v11`);
-  console.log(`   Voz: onyx (masculina neutra)`);
-  console.log(`   Region: ${AWS_REGION}`);
+  console.log(`\n🚀 Bomedia Video Factory v12`);
+  console.log(`   Voz: onyx | Escenas: pipe format`);
   console.log(`   Lambda: ${LAMBDA_FUNCTION || "⚠️ not set"}`);
-  console.log(`   OPENAI TTS: ${OPENAI_KEY ? "✅" : "⚠️ sin key"}`);
   console.log(`   BASE_URL: ${BASE_URL}\n`);
 });
