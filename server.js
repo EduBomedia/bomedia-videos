@@ -1,4 +1,4 @@
-// server.js v7 — Bomedia Video Factory — con Dockerfile + Chromium del sistema
+// server.js v8 — audio servido via HTTP para que Remotion lo pueda acceder
 const express  = require("express");
 const { execSync } = require("child_process");
 const https    = require("https");
@@ -13,17 +13,18 @@ const OPENAI_KEY = process.env.OPENAI_API_KEY || "";
 const BASE_URL   = process.env.RAILWAY_PUBLIC_DOMAIN
   ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
   : `http://localhost:${PORT}`;
-
-// Chromium del sistema (instalado via Dockerfile)
 const CHROME_PATH = process.env.REMOTION_CHROME_HEADLESS_SHELL || "/usr/bin/chromium";
 
 const VIDEOS_DIR = path.join(__dirname, "public_videos");
+const AUDIO_DIR  = path.join(__dirname, "public_audio");
 if (!fs.existsSync(VIDEOS_DIR)) fs.mkdirSync(VIDEOS_DIR, { recursive: true });
+if (!fs.existsSync(AUDIO_DIR))  fs.mkdirSync(AUDIO_DIR,  { recursive: true });
 
 app.use(express.json({ limit: "10mb" }));
 app.use("/videos", express.static(VIDEOS_DIR));
+app.use("/audio",  express.static(AUDIO_DIR));  // ← audio accesible via HTTP
 
-app.get("/",       (req, res) => res.json({ status: "ok", version: "7.0.0", chrome: CHROME_PATH }));
+app.get("/",       (req, res) => res.json({ status: "ok", version: "8.0.0" }));
 app.get("/status", (req, res) => res.json({ status: "ready", uptime: process.uptime() }));
 
 function autoGenerateEscenas(numImagenes, duracionSeg) {
@@ -33,9 +34,9 @@ function autoGenerateEscenas(numImagenes, duracionSeg) {
   const numScenes  = Math.min(numImagenes, 4);
   const sceneDur   = Math.floor(contentDur / numScenes);
   return Array.from({ length: numScenes }, (_, i) => ({
-    seg_inicio:    introEnd + i * sceneDur,
-    seg_fin:       introEnd + (i + 1) * sceneDur,
-    img_index:     i,
+    seg_inicio: introEnd + i * sceneDur,
+    seg_fin:    introEnd + (i + 1) * sceneDur,
+    img_index:  i,
     texto_overlay: ""
   }));
 }
@@ -100,16 +101,18 @@ app.post("/render", async (req, res) => {
   const safeId    = idea_id.replace(/[^a-zA-Z0-9_-]/g, "_");
   const outFile   = path.join(VIDEOS_DIR, `${safeId}.mp4`);
   const propsFile = path.join(os.tmpdir(), `${safeId}-props.json`);
-  const audioFile = path.join(os.tmpdir(), `${safeId}-audio.mp3`);
+  // Audio en carpeta pública para que Remotion lo acceda via HTTP
+  const audioFile = path.join(AUDIO_DIR, `${safeId}-audio.mp3`);
 
   try {
-    let resolvedAudio = undefined;
+    let audioUrl = undefined;
     if (guion_tts && OPENAI_KEY) {
       console.log("   🎵 Generando audio...");
       try {
         await generateAudio(guion_tts, audioFile);
-        resolvedAudio = audioFile;
-        console.log("   🎵 Audio OK");
+        // URL pública que Remotion puede descargar
+        audioUrl = `${BASE_URL}/audio/${safeId}-audio.mp3`;
+        console.log(`   🎵 Audio OK → ${audioUrl}`);
       } catch (e) {
         console.warn("   ⚠️ Audio falló:", e.message);
       }
@@ -124,7 +127,7 @@ app.post("/render", async (req, res) => {
       escenas: escenasArr, imagenes: imagenesArr,
       plantilla, duracion_seg: durSeg,
       variacion: Number(variacion) || 1,
-      audio_url: resolvedAudio,
+      audio_url: audioUrl,
       formato: isVertical ? "vertical" : "horizontal",
     };
 
@@ -133,7 +136,6 @@ app.post("/render", async (req, res) => {
     const frames = durSeg * 30;
     console.log(`   🎬 Renderizando ${frames} frames...`);
 
-    // Usar Chromium del sistema via variable de entorno
     execSync(
       `npx remotion render ${composition} "${outFile}" --props="${propsFile}" --frames=0-${frames-1} --log=warn --overwrite --browser-executable="${CHROME_PATH}"`,
       { cwd: __dirname, stdio: "pipe", timeout: 300000,
@@ -158,7 +160,7 @@ app.post("/render", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`\n🚀 Bomedia Video Factory v7`);
+  console.log(`\n🚀 Bomedia Video Factory v8`);
   console.log(`   Chrome: ${CHROME_PATH}`);
   console.log(`   OPENAI TTS: ${OPENAI_KEY ? "✅" : "⚠️ sin key"}`);
   console.log(`   BASE_URL: ${BASE_URL}\n`);
